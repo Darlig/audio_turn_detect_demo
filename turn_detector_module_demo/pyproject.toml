@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turn-detector-module-demo"
+version = "0.1.0"
+description = "LiveKit audio turn detector v1-mini module demo"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "aiohttp>=3.9",
+  "livekit>=1.1.9",
+  "livekit-api>=1.1.0",
+  "livekit-agents[turn-detector,silero]>=1.6.3",
+  "livekit-local-inference>=0.2.5",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "soundfile>=0.12",
+  "websockets>=12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+]
+voice = [
+  "funasr",
+  "torch==2.4.1",
+  "torchaudio==2.4.1",
+]
+
+[project.scripts]
+turn-detector-module-demo = "turn_detector_module_demo.app:main"
+voice-agent = "turn_detector_module_demo.voice_agent:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,5 @@
+funasr
+livekit-agents[turn-detector,silero]
+torch
+torchaudio
+websockets

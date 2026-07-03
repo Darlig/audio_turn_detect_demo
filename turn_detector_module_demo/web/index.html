@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LiveKit Voice Agent</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260703-1125" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>LiveKit Voice Agent</h1>
+          <p id="sessionSubtitle">audio-turn-demo</p>
+        </div>
+        <div id="connectionBadge" class="badge">offline</div>
+      </header>
+
+      <section class="controls" aria-label="demo controls">
+        <div class="control-group">
+          <label for="roomName">Room</label>
+          <input id="roomName" value="audio-turn-demo" autocomplete="off" />
+        </div>
+        <button id="connectBtn" type="button">Connect</button>
+        <button id="micBtn" type="button" disabled>Start mic</button>
+        <label id="fileButton" class="file-button" for="fileInput">Replay file</label>
+        <input id="fileInput" type="file" accept="audio/*" disabled />
+        <button id="stopBtn" type="button" disabled>Stop</button>
+      </section>
+
+      <section class="debug-panel" aria-label="debug TTS simulation">
+        <div class="debug-copy">
+          <label for="debugTtsText">Debug TTS simulation</label>
+          <textarea
+            id="debugTtsText"
+            rows="3"
+            maxlength="500"
+            spellcheck="false"
+          >你好，请用一句话介绍一下你自己。</textarea>
+        </div>
+        <div class="debug-actions">
+          <button id="debugTtsSessionBtn" type="button" disabled>Start simulation</button>
+          <button id="debugTtsBtn" type="button" disabled>Synthesize</button>
+          <button id="debugTtsStartBtn" type="button" disabled>Start replay</button>
+          <button id="debugTtsPauseBtn" type="button" disabled>Pause as silence</button>
+          <button id="debugTtsEndBtn" type="button" disabled>End simulation</button>
+          <span id="debugTtsStatus" class="status-text">connect first</span>
+        </div>
+      </section>
+
+      <section class="eou-debug-panel" aria-label="agent eou debug">
+        <div class="panel-heading">
+          <span class="label">Agent EOU Debug</span>
+          <span id="agentEouStatus" class="status-text">waiting</span>
+        </div>
+        <div class="eou-debug-grid">
+          <div>
+            <span class="label">Probability</span>
+            <strong id="agentEouProbability">--</strong>
+          </div>
+          <div>
+            <span class="label">Threshold</span>
+            <strong id="agentEouThreshold">--</strong>
+          </div>
+          <div>
+            <span class="label">Delay</span>
+            <strong id="agentEouDelay">--</strong>
+          </div>
+          <div>
+            <span class="label">Result</span>
+            <strong id="agentEouResult">waiting</strong>
+          </div>
+          <div>
+            <span class="label">Trigger</span>
+            <strong id="agentEouTrigger">--</strong>
+          </div>
+          <div>
+            <span class="label">Source</span>
+            <strong id="agentEouSource">--</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="latency-panel" aria-label="turn latency metrics">
+        <div class="panel-heading">
+          <span class="label">Turn Latency</span>
+          <span id="latencyStatus" class="status-text">waiting</span>
+        </div>
+        <div class="latency-grid">
+          <div>
+            <span class="label">STT</span>
+            <strong id="latencyStt">--</strong>
+          </div>
+          <div>
+            <span class="label">EOU Wait</span>
+            <strong id="latencyEouWait">--</strong>
+          </div>
+          <div>
+            <span class="label">LLM TTFT</span>
+            <strong id="latencyLlm">--</strong>
+          </div>
+          <div>
+            <span class="label">TTS First</span>
+            <strong id="latencyTts">--</strong>
+          </div>
+          <div>
+            <span class="label">Total</span>
+            <strong id="latencyTotal">--</strong>
+          </div>
+          <div>
+            <span class="label">Mode</span>
+            <strong id="latencyMode">--</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="state-panel" aria-label="conversation state">
+        <div>
+          <span class="label">Dialogue</span>
+          <strong id="dialogueState">offline</strong>
+        </div>
+        <div>
+          <span class="label">Agent</span>
+          <strong id="agentState">not joined</strong>
+        </div>
+        <div>
+          <span class="label">Input</span>
+          <strong id="inputState">idle</strong>
+        </div>
+        <div>
+          <span class="label">Playback</span>
+          <strong id="audioState">locked</strong>
+        </div>
+      </section>
+
+      <section class="transcript-grid" aria-label="live transcripts">
+        <section class="transcript-panel" aria-label="user transcript">
+          <div class="panel-heading">
+            <span class="label">User ASR</span>
+            <span id="userTranscriptStatus" class="status-text">waiting</span>
+          </div>
+          <p id="userTranscript" class="live-text empty">--</p>
+        </section>
+        <section class="transcript-panel assistant" aria-label="assistant transcript">
+          <div class="panel-heading">
+            <span class="label">Assistant</span>
+            <span id="assistantTranscriptStatus" class="status-text">waiting</span>
+          </div>
+          <p id="assistantTranscript" class="live-text empty">--</p>
+        </section>
+      </section>
+
+      <section class="conversation-panel" aria-label="conversation">
+        <div class="panel-heading">
+          <span class="label">Conversation</span>
+          <span id="conversationStatus" class="status-text">ready</span>
+        </div>
+        <div id="conversationFeed" class="conversation-feed"></div>
+      </section>
+
+      <section class="remote-audio-panel" aria-label="agent audio">
+        <div class="panel-heading">
+          <span class="label">Agent audio</span>
+          <span id="remoteAudioStatus" class="status-text">waiting</span>
+        </div>
+        <div id="remoteAudio" class="remote-audio"></div>
+      </section>
+
+      <section class="metrics" aria-label="current detector values">
+        <div>
+          <span class="label">Score</span>
+          <strong id="scoreValue">--</strong>
+        </div>
+        <div>
+          <span class="label">Threshold</span>
+          <strong id="thresholdValue">--</strong>
+        </div>
+        <div>
+          <span class="label">Decision</span>
+          <strong id="decisionValue">waiting</strong>
+        </div>
+        <div>
+          <span class="label">Time</span>
+          <strong id="timeValue">0.0s</strong>
+        </div>
+      </section>
+
+      <section class="chart-panel" aria-label="shared timeline">
+        <canvas id="timeline" width="1200" height="520"></canvas>
+        <div class="legend">
+          <span><i class="swatch audio"></i>audio progress</span>
+          <span><i class="swatch score"></i>eot score</span>
+          <span><i class="swatch decision"></i>eot decision</span>
+          <span><i class="swatch threshold"></i>threshold</span>
+        </div>
+      </section>
+
+      <section class="status-panel" aria-label="event log">
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="/static/app.js?v=20260703-1125"></script>
+  </body>
+</html>

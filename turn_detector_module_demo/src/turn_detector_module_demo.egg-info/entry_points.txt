@@ -1,0 +1,3 @@
+[console_scripts]
+turn-detector-module-demo = turn_detector_module_demo.app:main
+voice-agent = turn_detector_module_demo.voice_agent:main
