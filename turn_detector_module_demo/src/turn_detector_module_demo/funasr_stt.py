@@ -54,7 +54,7 @@ class FunASRSTTOptions:
     chunk_interval: int = 10
     hotwords: str = ""
     wav_name: str = "livekit-agent"
-    internal_vad: bool = True
+    internal_vad: bool = False
     final_wait_timeout: float = 2.0
 
 
@@ -105,7 +105,7 @@ class FunASRSTT(stt.STT):
             wav_name=wav_name or os.getenv("FUNASR_WAV_NAME", "livekit-agent"),
             internal_vad=internal_vad
             if internal_vad is not None
-            else _env_bool("FUNASR_INTERNAL_VAD", True),
+            else _env_bool("FUNASR_INTERNAL_VAD", False),
             final_wait_timeout=final_wait_timeout
             if final_wait_timeout is not None
             else float(os.getenv("FUNASR_FINAL_WAIT_TIMEOUT", "2.0")),
@@ -194,6 +194,9 @@ class FunASRRecognizeStream(stt.RecognizeStream):
         active_timing = _UtteranceTiming(seq=0)
         pending_timings: deque[_UtteranceTiming] = deque()
         stream_audio_origin_at: float | None = None
+        latest_audio_tail_at: float | None = None
+        final_seq = 0
+        partial_transcript = _PartialTranscriptAccumulator()
 
         async def finish_current_utterance() -> None:
             nonlocal active_timing, sent_audio_since_finish
@@ -207,7 +210,11 @@ class FunASRRecognizeStream(stt.RecognizeStream):
                 sent_audio_since_finish = False
 
         async def forward_audio() -> None:
-            nonlocal active_timing, sent_audio_since_finish, stream_audio_origin_at, utterance_seq
+            nonlocal active_timing
+            nonlocal sent_audio_since_finish
+            nonlocal stream_audio_origin_at
+            nonlocal latest_audio_tail_at
+            nonlocal utterance_seq
             async for item in self._input_ch:
                 if isinstance(item, self._FlushSentinel):
                     if vad_stream is not None:
@@ -220,6 +227,7 @@ class FunASRRecognizeStream(stt.RecognizeStream):
 
                 await client.send_audio(_audio_frame_bytes(item))
                 frame_tail_at = time.perf_counter()
+                latest_audio_tail_at = frame_tail_at
                 if active_timing.seq == 0:
                     utterance_seq += 1
                     active_timing.seq = utterance_seq
@@ -234,12 +242,24 @@ class FunASRRecognizeStream(stt.RecognizeStream):
             await finish_current_utterance()
 
         async def receive_results() -> None:
+            nonlocal final_seq
             async for result in client.events():
-                timing = pending_timings[0] if result.is_final and pending_timings else None
+                timing = None
+                if result.is_final and pending_timings:
+                    timing = pending_timings[0]
+                elif result.is_final:
+                    final_seq += 1
+                    timing = _server_segment_timing(
+                        result,
+                        seq=final_seq,
+                        stream_audio_origin_at=stream_audio_origin_at,
+                        latest_audio_tail_at=latest_audio_tail_at,
+                    )
                 event = self._speech_event_from_result(
                     result,
                     timing=timing,
                     stream_audio_origin_at=stream_audio_origin_at,
+                    partial_transcript=partial_transcript,
                 )
                 if event is None:
                     continue
@@ -302,8 +322,16 @@ class FunASRRecognizeStream(stt.RecognizeStream):
         *,
         timing: _UtteranceTiming | None = None,
         stream_audio_origin_at: float | None = None,
+        partial_transcript: "_PartialTranscriptAccumulator | None" = None,
     ) -> stt.SpeechEvent | None:
-        text = result.display_text if not result.is_final else result.text
+        if result.is_final:
+            text = result.text
+            if partial_transcript is not None:
+                partial_transcript.reset()
+        else:
+            text = result.display_text
+            if partial_transcript is not None:
+                text = partial_transcript.update(text)
         text = text.strip()
         if not text:
             return None
@@ -353,6 +381,30 @@ class FunASRRecognizeStream(stt.RecognizeStream):
                 )
             ],
         )
+
+
+class _PartialTranscriptAccumulator:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def reset(self) -> None:
+        self.text = ""
+
+    def update(self, partial: str) -> str:
+        partial = partial.strip()
+        if not partial:
+            return self.text
+        if not self.text:
+            self.text = partial
+        elif partial == self.text:
+            pass
+        elif partial.startswith(self.text):
+            self.text = partial
+        elif self.text in partial and len(partial) > len(self.text):
+            self.text = partial
+        elif not self.text.endswith(partial):
+            self.text += partial
+        return self.text
 
 
 def _iter_audio_buffer(buffer: AudioBuffer) -> list[rtc.AudioFrame]:
@@ -415,6 +467,45 @@ def _resolve_final_audio_tail(
     if timing.audio_tail_at is not None:
         return timing.audio_tail_at, "last_audio_frame"
     return timing.endpoint_sent_at, "endpoint_sent"
+
+
+def _server_segment_timing(
+    result: ASRResult,
+    *,
+    seq: int,
+    stream_audio_origin_at: float | None,
+    latest_audio_tail_at: float | None,
+) -> _UtteranceTiming | None:
+    if stream_audio_origin_at is None:
+        return None
+    segment_end_ms = _numeric_raw_value(result.raw.get("segment_end_ms"))
+    if segment_end_ms is None:
+        return None
+    segment_start_ms = _numeric_raw_value(result.raw.get("segment_start_ms")) or 0.0
+    segment_seq = int(_numeric_raw_value(result.raw.get("segment_seq")) or seq)
+    audio_started_at = stream_audio_origin_at + segment_start_ms / 1000.0
+    audio_tail_at = stream_audio_origin_at + segment_end_ms / 1000.0
+    if latest_audio_tail_at is not None:
+        audio_tail_at = min(audio_tail_at, latest_audio_tail_at)
+    return _UtteranceTiming(
+        seq=segment_seq,
+        audio_started_at=audio_started_at,
+        audio_tail_at=audio_tail_at,
+        speech_tail_at=audio_tail_at,
+    )
+
+
+def _numeric_raw_value(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _is_plausible_timestamp_tail(timestamp_tail_at: float, timing: _UtteranceTiming) -> bool:

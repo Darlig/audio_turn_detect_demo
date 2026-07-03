@@ -86,8 +86,16 @@ not perform the FunASR package update check.
 
 ## Client Integration
 
+The service defaults to `FUNASR_STREAMING_VAD=true`. In that mode it keeps one
+continuous websocket audio stream open, uses FunASR `fsmn-vad` streaming
+endpointing to cut speech segments, emits `2pass-online` partial results during
+speech, runs the offline ASR model for the detected segment at speech end, and
+then clears the segment cache. The stop message remains a manual flush/end-input
+fallback.
+
 `FunASRWebSocketClient` connects to the service, sends a start message, streams
-PCM16LE audio bytes, sends a stop message, and yields parsed ASR events:
+PCM16LE audio bytes, optionally sends a stop message to flush, and yields parsed
+ASR events:
 
 ```python
 from funasr_ws_client import FunASRWebSocketClient

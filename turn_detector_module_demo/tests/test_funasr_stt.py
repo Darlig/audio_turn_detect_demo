@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import asyncio
 import sys
 from pathlib import Path
@@ -27,6 +26,7 @@ from turn_detector_module_demo.funasr_stt import (
     _UtteranceTiming,
     _audio_frame_bytes,
     _resolve_final_audio_tail,
+    _server_segment_timing,
 )
 
 
@@ -113,6 +113,70 @@ async def test_funasr_stream_maps_online_and_offline_results(monkeypatch: pytest
     ]
     assert events[0].alternatives[0].text == "你好"
     assert events[1].alternatives[0].text == "你好，世界。"
+
+
+@pytest.mark.asyncio
+async def test_funasr_stream_accumulates_online_partial_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FragmentFunASRClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.results: asyncio.Queue[ASRResult | None] = asyncio.Queue()
+            self.fragments = iter(["你", "好"])
+
+        async def connect(self) -> None:
+            return None
+
+        async def send_audio(self, _pcm16le: bytes) -> None:
+            fragment = next(self.fragments)
+            await self.results.put(
+                ASRResult(
+                    text=fragment,
+                    mode="2pass-online",
+                    is_final=False,
+                    raw={"mode": "2pass-online", "text": fragment},
+                )
+            )
+
+        async def finish_utterance(self) -> None:
+            await self.results.put(
+                ASRResult(
+                    text="你好。",
+                    mode="2pass-offline",
+                    is_final=True,
+                    raw={"mode": "2pass-offline", "text": "你好。"},
+                )
+            )
+
+        async def events(self):
+            while True:
+                item = await self.results.get()
+                if item is None:
+                    break
+                yield item
+
+        async def close(self) -> None:
+            await self.results.put(None)
+
+    monkeypatch.setattr(funasr_stt, "FunASRWebSocketClient", FragmentFunASRClient)
+    funasr = FunASRSTT(
+        url="ws://fake-funasr",
+        internal_vad=False,
+        final_wait_timeout=1.0,
+    )
+    stream = funasr.stream()
+    events: list[stt.SpeechEvent] = []
+
+    async with stream:
+        stream.push_frame(_audio_frame())
+        stream.push_frame(_audio_frame())
+        stream.flush()
+        async for event in stream:
+            events.append(event)
+            if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+                break
+
+    assert [event.alternatives[0].text for event in events] == ["你", "你好", "你好。"]
 
 
 @pytest.mark.asyncio
@@ -228,3 +292,25 @@ def test_latency_anchor_rejects_timestamp_far_before_vad_tail() -> None:
 
     assert tail_at == 119.5
     assert source == "internal_vad"
+
+
+def test_server_segment_timing_uses_absolute_segment_offsets() -> None:
+    result = ASRResult(
+        text="你好",
+        mode="2pass-offline",
+        is_final=True,
+        raw={"segment_seq": 7, "segment_start_ms": 2500, "segment_end_ms": 3100},
+    )
+
+    timing = _server_segment_timing(
+        result,
+        seq=1,
+        stream_audio_origin_at=100.0,
+        latest_audio_tail_at=110.0,
+    )
+
+    assert timing is not None
+    assert timing.seq == 7
+    assert timing.audio_started_at == 102.5
+    assert timing.audio_tail_at == 103.1
+    assert timing.speech_tail_at == 103.1

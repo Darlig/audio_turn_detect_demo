@@ -51,6 +51,8 @@ DEMO_SSL_KEY_FILE=
 FUNASR_URL=ws://127.0.0.1:10095
 FUNASR_MODE=2pass
 FUNASR_LANGUAGE=zh
+FUNASR_STREAMING_VAD=true
+FUNASR_INTERNAL_VAD=false
 AGENT_ENDPOINT_MAX_DELAY=2.5
 AGENT_DEBUG_ENDPOINT_MAX_DELAY=
 AGENT_INSTRUCTIONS=
@@ -119,6 +121,13 @@ Terminal 3, start FunASR:
 cd /home/weiy/project/spoken_dialogue/livekit/audio_turn_detect_demo/turn_detector_module_demo
 bash scripts/start_funasr_server.sh
 ```
+
+The local FunASR service defaults to server-side streaming VAD endpointing
+(`FUNASR_STREAMING_VAD=true`): it continuously receives PCM audio, uses
+FunASR `fsmn-vad` to cut speech segments, emits `2pass-online` partials during
+speech, runs the offline model at speech end, and clears the segment cache.
+The LiveKit STT adapter therefore defaults to `FUNASR_INTERNAL_VAD=false` and
+does not inject its own VAD stop signals during normal microphone streaming.
 
 For CUDA:
 
