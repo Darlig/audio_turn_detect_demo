@@ -28,3 +28,17 @@ load_env_file() {
     export "${key}=${value}"
   done <"${env_file}"
 }
+
+configure_ca_bundle() {
+  if [[ -n "${SSL_CERT_FILE:-}" && ! -r "${SSL_CERT_FILE}" ]]; then
+    echo "CA bundle is not readable: ${SSL_CERT_FILE}" >&2
+    return 1
+  fi
+  if [[ -n "${REQUESTS_CA_BUNDLE:-}" && ! -r "${REQUESTS_CA_BUNDLE}" ]]; then
+    echo "Requests CA bundle is not readable: ${REQUESTS_CA_BUNDLE}" >&2
+    return 1
+  fi
+  if [[ -n "${SSL_CERT_FILE:-}" && -z "${REQUESTS_CA_BUNDLE:-}" ]]; then
+    export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-${SSL_CERT_FILE}}"
+  fi
+}

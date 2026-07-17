@@ -13,6 +13,8 @@ FUNASR_CPP_ROOT="${FUNASR_CPP_ROOT:-${REPO_ROOT}/asr_module/funasr_cpp_onnx}"
 FUNASR_CPP_DEPS_DIR="${FUNASR_CPP_DEPS_DIR:-${FUNASR_CPP_ROOT}/deps}"
 FUNASR_CPP_BUILD_DIR="${FUNASR_CPP_BUILD_DIR:-${FUNASR_CPP_ROOT}/build/websocket}"
 FUNASR_CPP_BIN="${FUNASR_CPP_BIN:-${FUNASR_CPP_BUILD_DIR}/bin/funasr-wss-server-2pass}"
+FUNASR_CPP_ONNXRUNTIME_LIB_DIR="${FUNASR_CPP_ONNXRUNTIME_LIB_DIR:-${FUNASR_CPP_DEPS_DIR}/onnxruntime/lib}"
+FUNASR_CPP_FFMPEG_LIB_DIR="${FUNASR_CPP_FFMPEG_LIB_DIR:-${FUNASR_CPP_DEPS_DIR}/ffmpeg/lib}"
 FUNASR_CPP_HOST="${FUNASR_CPP_HOST:-127.0.0.1}"
 FUNASR_CPP_PORT="${FUNASR_CPP_PORT:-10095}"
 FUNASR_CPP_DOWNLOAD_MODEL_DIR="${FUNASR_CPP_DOWNLOAD_MODEL_DIR:-${FUNASR_CPP_ROOT}/models}"
@@ -34,6 +36,23 @@ case "${FUNASR_CPP_HOTWORD_FILE}" in
   *) FUNASR_CPP_HOTWORD_FILE="${REPO_ROOT}/${FUNASR_CPP_HOTWORD_FILE}" ;;
 esac
 
+resolve_model_dir() {
+  local model_dir="$1"
+  if [[ "${model_dir}" != /* && -d "${FUNASR_CPP_DOWNLOAD_MODEL_DIR}/${model_dir}" ]]; then
+    model_dir="${FUNASR_CPP_DOWNLOAD_MODEL_DIR}/${model_dir}"
+  fi
+  printf '%s' "${model_dir}"
+}
+
+FUNASR_CPP_MODEL_DIR="$(resolve_model_dir "${FUNASR_CPP_MODEL_DIR}")"
+FUNASR_CPP_ONLINE_MODEL_DIR="$(resolve_model_dir "${FUNASR_CPP_ONLINE_MODEL_DIR}")"
+FUNASR_CPP_VAD_DIR="$(resolve_model_dir "${FUNASR_CPP_VAD_DIR}")"
+FUNASR_CPP_PUNC_DIR="$(resolve_model_dir "${FUNASR_CPP_PUNC_DIR}")"
+FUNASR_CPP_ITN_DIR="$(resolve_model_dir "${FUNASR_CPP_ITN_DIR}")"
+if [[ -n "${FUNASR_CPP_LM_DIR}" ]]; then
+  FUNASR_CPP_LM_DIR="$(resolve_model_dir "${FUNASR_CPP_LM_DIR}")"
+fi
+
 cpu_count="$(nproc 2>/dev/null || echo 4)"
 FUNASR_CPP_DECODER_THREAD_NUM="${FUNASR_CPP_DECODER_THREAD_NUM:-${cpu_count}}"
 FUNASR_CPP_MODEL_THREAD_NUM="${FUNASR_CPP_MODEL_THREAD_NUM:-1}"
@@ -49,7 +68,18 @@ if [[ -x "${ENV_PREFIX}/bin/python" ]]; then
   export PATH="${ENV_PREFIX}/bin:${PATH}"
 fi
 
-export LD_LIBRARY_PATH="${FUNASR_CPP_DEPS_DIR}/onnxruntime-linux-x64-1.14.0/lib:${FUNASR_CPP_DEPS_DIR}/ffmpeg-master-latest-linux64-gpl-shared/lib:${LD_LIBRARY_PATH:-}"
+funasr_library_dirs=(
+  "${FUNASR_CPP_BUILD_DIR}/src"
+  "${FUNASR_CPP_BUILD_DIR}/yaml-cpp"
+  "${FUNASR_CPP_BUILD_DIR}/openfst/src/lib"
+  "${FUNASR_CPP_BUILD_DIR}/openfst/src/script"
+  "${FUNASR_CPP_BUILD_DIR}/glog"
+  "${FUNASR_CPP_BUILD_DIR}/gflags"
+  "${FUNASR_CPP_BUILD_DIR}/_deps/portaudio-build"
+  "${FUNASR_CPP_ONNXRUNTIME_LIB_DIR}"
+  "${FUNASR_CPP_FFMPEG_LIB_DIR}"
+)
+export LD_LIBRARY_PATH="$(IFS=:; echo "${funasr_library_dirs[*]}"):${LD_LIBRARY_PATH:-}"
 
 mkdir -p "${FUNASR_CPP_DOWNLOAD_MODEL_DIR}"
 if [[ ! -f "${FUNASR_CPP_HOTWORD_FILE}" ]]; then

@@ -1,6 +1,8 @@
 .conda
 logs
 __pycache__
+turn_detector_module_demo/.env
+turn_detector_module_demo/.local/
 asr_module/funasr_cpp_onnx/deps/
 asr_module/funasr_cpp_onnx/models/
 asr_module/funasr_cpp_onnx/build/

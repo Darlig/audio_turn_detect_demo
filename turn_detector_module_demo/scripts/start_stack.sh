@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LIVEKIT_NODE_IP=192.168.0.179
-DEMO_HOST=0.0.0.0
-DEMO_PORT=8090
-AGENT_DEBUG_ENDPOINT_MAX_DELAY=10
-AGENT_REQUIRE_EOU_POSITIVE=true
-
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${PROJECT_DIR}/scripts/env.sh"
 load_env_file "${PROJECT_DIR}/.env"
+
+export LIVEKIT_NODE_IP="${LIVEKIT_NODE_IP:-}"
+export DEMO_HOST="${DEMO_HOST:-0.0.0.0}"
+export DEMO_PORT="${DEMO_PORT:-8090}"
+export AGENT_DEBUG_ENDPOINT_MAX_DELAY="${AGENT_DEBUG_ENDPOINT_MAX_DELAY:-10}"
+export AGENT_REQUIRE_EOU_POSITIVE="${AGENT_REQUIRE_EOU_POSITIVE:-true}"
 
 LOG_DIR="${LOG_DIR:-${PROJECT_DIR}/logs}"
 DEMO_HOST="${DEMO_HOST:-0.0.0.0}"
@@ -17,18 +17,17 @@ DEMO_PORT="${DEMO_PORT:-8090}"
 DEMO_SSL_CERT_FILE="${DEMO_SSL_CERT_FILE:-}"
 DEMO_SSL_KEY_FILE="${DEMO_SSL_KEY_FILE:-}"
 
-if [[ -z "${DEMO_SSL_CERT_FILE}" && -z "${DEMO_SSL_KEY_FILE}" ]]; then
-  default_cert="${PROJECT_DIR}/certs/dev-cert.pem"
-  default_key="${PROJECT_DIR}/certs/dev-key.pem"
-  if [[ -f "${default_cert}" && -f "${default_key}" ]]; then
-    DEMO_SSL_CERT_FILE="${default_cert}"
-    DEMO_SSL_KEY_FILE="${default_key}"
-  fi
-fi
-
 if [[ -n "${DEMO_SSL_CERT_FILE}" || -n "${DEMO_SSL_KEY_FILE}" ]]; then
   if [[ -z "${DEMO_SSL_CERT_FILE}" || -z "${DEMO_SSL_KEY_FILE}" ]]; then
     echo "Both DEMO_SSL_CERT_FILE and DEMO_SSL_KEY_FILE are required for HTTPS." >&2
+    exit 1
+  fi
+  if [[ ! -r "${DEMO_SSL_CERT_FILE}" ]]; then
+    echo "HTTPS certificate is not readable: ${DEMO_SSL_CERT_FILE}" >&2
+    exit 1
+  fi
+  if [[ ! -r "${DEMO_SSL_KEY_FILE}" ]]; then
+    echo "HTTPS private key is not readable: ${DEMO_SSL_KEY_FILE}" >&2
     exit 1
   fi
   DEMO_SCHEME="https"

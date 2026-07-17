@@ -8,6 +8,7 @@ ENV_PREFIX="${ENV_PREFIX:-${PROJECT_DIR}/.conda/${ENV_NAME}}"
 
 source "${PROJECT_DIR}/scripts/env.sh"
 load_env_file "${PROJECT_DIR}/.env"
+configure_ca_bundle
 
 cd "${PROJECT_DIR}"
 export NO_PROXY="${NO_PROXY:-127.0.0.1,localhost,::1}"

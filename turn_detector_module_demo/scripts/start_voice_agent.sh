@@ -9,6 +9,7 @@ ENV_PREFIX="${ENV_PREFIX:-${PROJECT_DIR}/.conda/${ENV_NAME}}"
 
 source "${PROJECT_DIR}/scripts/env.sh"
 load_env_file "${PROJECT_DIR}/.env"
+configure_ca_bundle
 
 export LIVEKIT_URL="${LIVEKIT_URL:-ws://127.0.0.1:8890}"
 export LIVEKIT_API_KEY="${LIVEKIT_API_KEY:-devkey}"

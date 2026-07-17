@@ -15,6 +15,10 @@ FUNASR_CPP_DEPS_DIR="${FUNASR_CPP_DEPS_DIR:-${FUNASR_CPP_ROOT}/deps}"
 FUNASR_CPP_BUILD_DIR="${FUNASR_CPP_BUILD_DIR:-${FUNASR_CPP_ROOT}/build/websocket}"
 FUNASR_CPP_ONNXRUNTIME_URL="${FUNASR_CPP_ONNXRUNTIME_URL:-https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/dep_libs/onnxruntime-linux-x64-1.14.0.tgz}"
 FUNASR_CPP_FFMPEG_URL="${FUNASR_CPP_FFMPEG_URL:-https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/dep_libs/ffmpeg-master-latest-linux64-gpl-shared.tar.xz}"
+FUNASR_CPP_ONNXRUNTIME_DIR="${FUNASR_CPP_ONNXRUNTIME_DIR:-${FUNASR_CPP_DEPS_DIR}/onnxruntime}"
+FUNASR_CPP_FFMPEG_DIR="${FUNASR_CPP_FFMPEG_DIR:-${FUNASR_CPP_DEPS_DIR}/ffmpeg}"
+FUNASR_CPP_ONNXRUNTIME_ARCHIVE="${FUNASR_CPP_ONNXRUNTIME_ARCHIVE:-${FUNASR_CPP_DEPS_DIR}/onnxruntime.tgz}"
+FUNASR_CPP_FFMPEG_ARCHIVE="${FUNASR_CPP_FFMPEG_ARCHIVE:-${FUNASR_CPP_DEPS_DIR}/ffmpeg.tar.xz}"
 FUNASR_CPP_BUILD_JOBS="${FUNASR_CPP_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 mkdir -p "${FUNASR_CPP_ROOT}" "${FUNASR_CPP_DEPS_DIR}" "${FUNASR_CPP_BUILD_DIR}"
@@ -39,25 +43,27 @@ else
   git -C "${FUNASR_CPP_UPSTREAM_DIR}" checkout FETCH_HEAD
 fi
 
-onnx_archive="${FUNASR_CPP_DEPS_DIR}/onnxruntime-linux-x64-1.14.0.tgz"
-ffmpeg_archive="${FUNASR_CPP_DEPS_DIR}/ffmpeg-master-latest-linux64-gpl-shared.tar.xz"
-fetch_archive "${FUNASR_CPP_ONNXRUNTIME_URL}" "${onnx_archive}"
-fetch_archive "${FUNASR_CPP_FFMPEG_URL}" "${ffmpeg_archive}"
+fetch_archive "${FUNASR_CPP_ONNXRUNTIME_URL}" "${FUNASR_CPP_ONNXRUNTIME_ARCHIVE}"
+fetch_archive "${FUNASR_CPP_FFMPEG_URL}" "${FUNASR_CPP_FFMPEG_ARCHIVE}"
 
-if [[ ! -d "${FUNASR_CPP_DEPS_DIR}/onnxruntime-linux-x64-1.14.0" ]]; then
-  tar -xzf "${onnx_archive}" -C "${FUNASR_CPP_DEPS_DIR}"
+if [[ ! -d "${FUNASR_CPP_ONNXRUNTIME_DIR}" ]]; then
+  mkdir -p "${FUNASR_CPP_ONNXRUNTIME_DIR}"
+  tar -xzf "${FUNASR_CPP_ONNXRUNTIME_ARCHIVE}" \
+    -C "${FUNASR_CPP_ONNXRUNTIME_DIR}" --strip-components=1
 fi
 
-if [[ ! -d "${FUNASR_CPP_DEPS_DIR}/ffmpeg-master-latest-linux64-gpl-shared" ]]; then
-  tar -xf "${ffmpeg_archive}" -C "${FUNASR_CPP_DEPS_DIR}"
+if [[ ! -d "${FUNASR_CPP_FFMPEG_DIR}" ]]; then
+  mkdir -p "${FUNASR_CPP_FFMPEG_DIR}"
+  tar -xf "${FUNASR_CPP_FFMPEG_ARCHIVE}" \
+    -C "${FUNASR_CPP_FFMPEG_DIR}" --strip-components=1
 fi
 
 cmake \
   -S "${FUNASR_CPP_UPSTREAM_DIR}/runtime/websocket" \
   -B "${FUNASR_CPP_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DONNXRUNTIME_DIR="${FUNASR_CPP_DEPS_DIR}/onnxruntime-linux-x64-1.14.0" \
-  -DFFMPEG_DIR="${FUNASR_CPP_DEPS_DIR}/ffmpeg-master-latest-linux64-gpl-shared"
+  -DONNXRUNTIME_DIR="${FUNASR_CPP_ONNXRUNTIME_DIR}" \
+  -DFFMPEG_DIR="${FUNASR_CPP_FFMPEG_DIR}"
 
 cmake --build "${FUNASR_CPP_BUILD_DIR}" --parallel "${FUNASR_CPP_BUILD_JOBS}"
 
