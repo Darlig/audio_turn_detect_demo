@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LIVEKIT_NODE_IP=192.168.0.179
+DEMO_HOST=0.0.0.0
+DEMO_PORT=8090
+AGENT_DEBUG_ENDPOINT_MAX_DELAY=10
+AGENT_REQUIRE_EOU_POSITIVE=true
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${PROJECT_DIR}/scripts/env.sh"
 load_env_file "${PROJECT_DIR}/.env"
@@ -52,7 +58,8 @@ start_bg() {
 start_bg livekit "${PROJECT_DIR}/scripts/start_livekit_server.sh"
 sleep "${LIVEKIT_START_DELAY:-1}"
 
-start_bg funasr "${PROJECT_DIR}/scripts/start_funasr_server.sh"
+FUNASR_SERVER_SCRIPT="${FUNASR_SERVER_SCRIPT:-${PROJECT_DIR}/scripts/start_funasr_cpp_onnx_server.sh}"
+start_bg funasr "${FUNASR_SERVER_SCRIPT}"
 sleep "${FUNASR_START_DELAY:-3}"
 
 web_args=(--host "${DEMO_HOST}" --port "${DEMO_PORT}")

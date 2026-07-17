@@ -195,6 +195,7 @@ def pcm16le_to_wav_bytes(pcm: bytes, *, sample_rate: int, num_channels: int) -> 
 
 async def events_ws(request: web.Request) -> web.WebSocketResponse:
     hub: EventHub = request.app["hub"]
+    worker: DetectorWorker = request.app["worker"]
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     await hub.add(ws)
@@ -208,9 +209,32 @@ async def events_ws(request: web.Request) -> web.WebSocketResponse:
         )
     )
     try:
-        async for _msg in ws:
-            pass
+        async for msg in ws:
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            try:
+                payload = json.loads(msg.data)
+                action = payload.get("action")
+                if action == "start":
+                    await worker.start_track(
+                        ws=ws,
+                        room=str(payload.get("room", "")),
+                        identity=str(payload.get("participantIdentity", "")),
+                        track_sid=str(payload.get("trackSid", "")),
+                        run_id=str(payload.get("runId", "")),
+                    )
+                elif action == "stop":
+                    await worker.stop_track(
+                        track_sid=str(payload.get("trackSid", "")), ws=ws
+                    )
+                else:
+                    raise ValueError(f"unknown detector action: {action}")
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                await hub.send(
+                    ws, {"type": "status", "level": "error", "message": str(exc)}
+                )
     finally:
+        await worker.stop_client(ws)
         await hub.remove(ws)
     return ws
 

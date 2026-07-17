@@ -41,6 +41,9 @@ const state = {
   activeInput: null,
   stoppedSinceLastRun: false,
   activeTrackSid: null,
+  detectorRunId: null,
+  detectorRoom: null,
+  detectorEventsWs: null,
   acceptingPoints: false,
   remoteAudioElements: new Map(),
   agentDispatchRequested: false,
@@ -305,6 +308,7 @@ async function connectRoom() {
     log("room connected");
   });
   room.on("disconnected", () => {
+    stopDetectorTrack();
     clearLiveBubbleTimer("user");
     clearLiveBubbleTimer("assistant");
     clearAssistantReadyTimer();
@@ -776,11 +780,12 @@ async function startMic() {
     noiseSuppression: false,
     autoGainControl: false,
   });
-  await state.room.localParticipant.publishTrack(track, {
+  const publication = await state.room.localParticipant.publishTrack(track, {
     name: "mic-audio-turn-demo",
     source: Track.Source.Microphone,
   });
   state.micTrack = track;
+  registerDetectorTrack(publication);
   state.activeInput = "mic";
   setInputState("microphone", "active");
   setDialogueState(state.activeAgentIdentity ? "listening" : "waiting agent", "active");
@@ -820,7 +825,7 @@ async function startFileReplay(file, options = {}) {
   const silenceSource = createSilenceSource(audioContext, destination);
 
   const mediaTrack = destination.stream.getAudioTracks()[0];
-  await state.room.localParticipant.publishTrack(mediaTrack, {
+  const publication = await state.room.localParticipant.publishTrack(mediaTrack, {
     name: `${trackPrefix}-${sanitizeTrackName(displayName)}`,
     source: Track.Source.Microphone,
   });
@@ -848,6 +853,7 @@ async function startFileReplay(file, options = {}) {
   });
 
   state.fileTrack = mediaTrack;
+  registerDetectorTrack(publication);
   state.fileAudio = audio;
   state.fileContext = audioContext;
   state.fileSilenceSource = silenceSource;
@@ -892,6 +898,7 @@ async function stopInput() {
   if (!state.room) {
     return;
   }
+  stopDetectorTrack();
   if (state.micTrack) {
     await state.room.localParticipant.unpublishTrack(state.micTrack, true);
     state.micTrack = null;
@@ -1007,12 +1014,13 @@ async function startDebugTtsSimulation() {
   const destination = audioContext.createMediaStreamDestination();
   const silenceSource = createSilenceSource(audioContext, destination);
   const mediaTrack = destination.stream.getAudioTracks()[0];
-  await state.room.localParticipant.publishTrack(mediaTrack, {
+  const publication = await state.room.localParticipant.publishTrack(mediaTrack, {
     name: `debug-tts-simulation-${Date.now()}`,
     source: Track.Source.Microphone,
   });
 
   state.debugSimTrack = mediaTrack;
+  registerDetectorTrack(publication);
   state.debugSimContext = audioContext;
   state.debugSimDestination = destination;
   state.debugSimSilenceSource = silenceSource;
@@ -1186,13 +1194,60 @@ function resetSeries(options = {}) {
 function connectEvents() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${protocol}://${window.location.host}/events`);
+  state.detectorEventsWs = ws;
+  ws.onopen = () => {
+    if (state.activeTrackSid && state.detectorRunId) {
+      sendDetectorAction("start");
+    }
+  };
   ws.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     handleEvent(payload);
   };
   ws.onclose = () => {
+    if (state.detectorEventsWs === ws) {
+      state.detectorEventsWs = null;
+    }
     setTimeout(connectEvents, 1000);
   };
+}
+
+function registerDetectorTrack(publication) {
+  const trackSid = publication?.trackSid || publication?.sid;
+  if (!trackSid || !state.clientIdentity || !state.room) {
+    throw new Error("cannot register EOT detector without room, identity, and track SID");
+  }
+  state.activeTrackSid = trackSid;
+  state.detectorRunId = crypto.randomUUID?.() || `eot-${Date.now()}-${Math.random()}`;
+  state.detectorRoom = state.room.name || el.roomName.value.trim() || "audio-turn-demo";
+  state.acceptingPoints = true;
+  sendDetectorAction("start");
+}
+
+function stopDetectorTrack() {
+  if (state.activeTrackSid && state.detectorRunId) {
+    sendDetectorAction("stop");
+  }
+  state.activeTrackSid = null;
+  state.detectorRunId = null;
+  state.detectorRoom = null;
+  state.acceptingPoints = false;
+}
+
+function sendDetectorAction(action) {
+  const ws = state.detectorEventsWs;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  ws.send(
+    JSON.stringify({
+      action,
+      room: state.detectorRoom,
+      participantIdentity: state.clientIdentity,
+      trackSid: state.activeTrackSid,
+      runId: state.detectorRunId,
+    })
+  );
 }
 
 function handleEvent(payload) {
@@ -1204,8 +1259,9 @@ function handleEvent(payload) {
     return;
   }
   if (payload.type === "track_started") {
-    resetSeries();
-    state.activeTrackSid = payload.trackSid;
+    if (!isCurrentDetectorEvent(payload)) {
+      return;
+    }
     state.acceptingPoints = true;
     state.threshold = payload.threshold;
     el.threshold.textContent = formatValue(payload.threshold);
@@ -1216,6 +1272,9 @@ function handleEvent(payload) {
     return;
   }
   if (payload.type === "track_ended") {
+    if (!isCurrentDetectorEvent(payload)) {
+      return;
+    }
     if (payload.trackSid === state.activeTrackSid) {
       state.acceptingPoints = false;
     }
@@ -1228,7 +1287,7 @@ function handleEvent(payload) {
   if (payload.type !== "point") {
     return;
   }
-  if (!state.acceptingPoints || payload.trackSid !== state.activeTrackSid) {
+  if (!state.acceptingPoints || !isCurrentDetectorEvent(payload)) {
     return;
   }
 
@@ -1247,6 +1306,17 @@ function handleEvent(payload) {
   }
   el.time.textContent = `${point.time.toFixed(1)}s`;
   draw();
+}
+
+function isCurrentDetectorEvent(payload) {
+  return Boolean(
+    state.activeTrackSid &&
+      state.detectorRunId &&
+      payload.trackSid === state.activeTrackSid &&
+      payload.runId === state.detectorRunId &&
+      payload.room === state.detectorRoom &&
+      payload.participant === state.clientIdentity
+  );
 }
 
 function pointWithDisplayTime(payload) {

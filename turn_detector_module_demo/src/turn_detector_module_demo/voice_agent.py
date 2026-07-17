@@ -82,7 +82,7 @@ from livekit.agents import (  # noqa: E402
 )
 from livekit.agents.voice.room_io import RoomOptions  # noqa: E402
 
-from .funasr_stt import FunASRSTT  # noqa: E402
+from .stt_factory import create_stt  # noqa: E402
 from .turn_metrics import (  # noqa: E402
     record_eou_confirmed,
     reset_turn_metrics,
@@ -136,16 +136,18 @@ async def entrypoint(ctx: JobContext) -> None:
         else endpoint_system_max_delay
     )
     endpoint_max_source = "debug" if endpoint_debug_max_delay is not None else "system"
+    require_eou_positive = _env_bool("AGENT_REQUIRE_EOU_POSITIVE", True)
     logger.info(
-        "endpointing config min_delay=%s max_delay=%s max_source=%s system_max_delay=%s",
+        "endpointing config min_delay=%s max_delay=%s max_source=%s system_max_delay=%s require_eou_positive=%s",
         endpoint_min_delay,
         endpoint_max_delay,
         endpoint_max_source,
         endpoint_system_max_delay,
+        require_eou_positive,
     )
 
     session = AgentSession(
-        stt=FunASRSTT(),
+        stt=create_stt(),
         llm=DoubaoResponsesLLM(
             temperature=_env_float("DOUBAO_TEMPERATURE"),
             max_output_tokens=_env_int("DOUBAO_MAX_OUTPUT_TOKENS"),
@@ -161,6 +163,7 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing={
                 "min_delay": endpoint_min_delay,
                 "max_delay": endpoint_max_delay,
+                "require_eou_positive": require_eou_positive,
             },
             interruption={
                 "resume_false_interruption": True,

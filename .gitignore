@@ -1,3 +1,9 @@
 .conda
 logs
 __pycache__
+asr_module/funasr_cpp_onnx/deps/
+asr_module/funasr_cpp_onnx/models/
+asr_module/funasr_cpp_onnx/build/
+asr_module/funasr_cpp_onnx/*.tar.gz
+asr_module/funasr_cpp_onnx/*.tar.xz
+asr_module/funasr_cpp_onnx/hotwords.txt

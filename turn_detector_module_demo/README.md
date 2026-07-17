@@ -48,13 +48,16 @@ DEMO_ROOM=audio-turn-demo
 DEMO_LANGUAGE=zh
 DEMO_SSL_CERT_FILE=
 DEMO_SSL_KEY_FILE=
-FUNASR_URL=ws://127.0.0.1:10095
-FUNASR_MODE=2pass
-FUNASR_LANGUAGE=zh
-FUNASR_STREAMING_VAD=true
-FUNASR_INTERNAL_VAD=false
+AGENT_STT_PROVIDER=funasr_cpp_onnx
+FUNASR_CPP_URL=ws://127.0.0.1:10095
+FUNASR_CPP_HOST=127.0.0.1
+FUNASR_CPP_PORT=10095
+FUNASR_CPP_CHUNK_SIZE=5,10,5
+FUNASR_CPP_SAMPLE_RATE=16000
+FUNASR_CPP_REPO_REF=main
 AGENT_ENDPOINT_MAX_DELAY=2.5
 AGENT_DEBUG_ENDPOINT_MAX_DELAY=
+AGENT_REQUIRE_EOU_POSITIVE=true
 AGENT_INSTRUCTIONS=
 AGENT_GREETING=
 ```
@@ -115,25 +118,33 @@ cd /home/weiy/project/spoken_dialogue/livekit/audio_turn_detect_demo/turn_detect
 bash scripts/start_demo.sh --host 127.0.0.1 --port 8090
 ```
 
-Terminal 3, start FunASR:
+Terminal 3, prepare and start the default FunASR C++/ONNX backend:
 
 ```bash
 cd /home/weiy/project/spoken_dialogue/livekit/audio_turn_detect_demo/turn_detector_module_demo
+bash scripts/prepare_funasr_cpp_onnx.sh
+bash scripts/start_funasr_cpp_onnx_server.sh
+```
+
+The default STT backend is `AGENT_STT_PROVIDER=funasr_cpp_onnx`. It uses the
+official FunASR C++ websocket `funasr-wss-server-2pass` runtime with ONNX
+models. The adapter streams continuous PCM to the server; official FunASR
+FSMN-VAD inside the C++ runtime controls online/offline 2pass endpointing.
+Online fragments are accumulated for LiveKit interim transcripts, and offline
+results are emitted as final transcripts.
+
+To run the previous Python FunASR backend instead:
+
+```bash
+AGENT_STT_PROVIDER=funasr_python bash scripts/start_voice_agent.sh dev
 bash scripts/start_funasr_server.sh
 ```
 
-The local FunASR service defaults to server-side streaming VAD endpointing
-(`FUNASR_STREAMING_VAD=true`): it continuously receives PCM audio, uses
-FunASR `fsmn-vad` to cut speech segments, emits `2pass-online` partials during
-speech, runs the offline model at speech end, and clears the segment cache.
-The LiveKit STT adapter therefore defaults to `FUNASR_INTERNAL_VAD=false` and
-does not inject its own VAD stop signals during normal microphone streaming.
-
-For CUDA:
-
-```bash
-FUNASR_DEVICE=cuda FUNASR_NGPU=1 bash scripts/start_funasr_server.sh
-```
+The C++ runtime thread defaults follow FunASR deployment guidance:
+`decoder_thread_num=nproc`, `model_thread_num=1`, and
+`io_thread_num=ceil(decoder_thread_num / 16)`. Override them with
+`FUNASR_CPP_DECODER_THREAD_NUM`, `FUNASR_CPP_MODEL_THREAD_NUM`, and
+`FUNASR_CPP_IO_THREAD_NUM`.
 
 Terminal 4, start the LiveKit voice agent:
 
@@ -149,6 +160,13 @@ debug wait window, for example:
 ```bash
 AGENT_DEBUG_ENDPOINT_MAX_DELAY=10 bash scripts/start_voice_agent.sh dev
 ```
+
+This demo also sets `AGENT_REQUIRE_EOU_POSITIVE=true` by default. With this
+strict gate, a `max_delay` result from the audio turn detector does not commit
+the user turn when the delay expires; the agent waits for later audio and only
+commits after the detector probability reaches the threshold. Set
+`AGENT_REQUIRE_EOU_POSITIVE=false` to restore the normal LiveKit endpointing
+fallback behavior.
 
 The agent entrypoint also supports the standard LiveKit Agents CLI mode:
 
@@ -246,6 +264,9 @@ The default voice prompt is a short natural Chinese assistant. Set
 
 - The detector worker and voice agent both use local LiveKit turn detector
   inference. The voice agent configures it through `TurnHandlingOptions`.
+- The demo enables strict audio-turn gating by default: STT final text is shown
+  immediately, but the user turn is committed only when the audio turn detector
+  is positive.
 - The local mini model accepts recent PCM audio only; no ASR transcript is used.
 - Default language is `zh`, so the default local threshold is the v1-mini Chinese
   threshold from LiveKit.

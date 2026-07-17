@@ -39,3 +39,15 @@ class EventHub:
             async with self._lock:
                 for ws in stale:
                     self._clients.discard(ws)
+
+    async def send(self, ws: web.WebSocketResponse, payload: dict[str, Any]) -> bool:
+        """Send a detector event only to the client that registered its track."""
+        if ws.closed:
+            await self.remove(ws)
+            return False
+        try:
+            await ws.send_str(json.dumps(payload, separators=(",", ":")))
+            return True
+        except ConnectionResetError:
+            await self.remove(ws)
+            return False
