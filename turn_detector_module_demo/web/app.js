@@ -12,6 +12,17 @@ const AGENT_EOU_DEBUG_TOPIC = "audio-turn-demo.agent-eou-debug";
 const AGENT_LATENCY_METRICS_TOPIC = "audio-turn-demo.latency-metrics";
 const REPLAY_LEAD_IN_MS = 800;
 const REPLAY_TAIL_MS = 1800;
+const DEBUG_TTS_TRIM_FRAME_MS = 10;
+const DEBUG_TTS_TRIM_PADDING_MS = 30;
+const DEBUG_TTS_RELATIVE_SILENCE_DB = -40;
+const REMOTE_SPEECH_RMS_THRESHOLD = 0.003;
+const REMOTE_SPEECH_CONFIRM_FRAMES = 2;
+const REMOTE_SPEECH_RELEASE_MS = 300;
+const MIC_VAD_MIN_RMS = 0.004;
+const MIC_VAD_NOISE_MULTIPLIER = 3;
+const MIC_VAD_SPEECH_CONFIRM_FRAMES = 3;
+const MIC_VAD_SILENCE_MS = 250;
+const MIC_VAD_NOISE_ALPHA = 0.03;
 const TRANSCRIPT_DEDUPE_MS = 15000;
 const FINAL_BUBBLE_SETTLE_MS = 1800;
 const ASSISTANT_READY_SETTLE_MS = 2200;
@@ -20,6 +31,7 @@ const PENDING_AGENT_IDENTITY = "__pending_agent_dispatch__";
 const state = {
   room: null,
   micTrack: null,
+  micAudioMonitor: null,
   fileTrack: null,
   fileAudio: null,
   fileContext: null,
@@ -46,6 +58,8 @@ const state = {
   detectorEventsWs: null,
   acceptingPoints: false,
   remoteAudioElements: new Map(),
+  remoteAudioMonitors: new Map(),
+  agentOutputActive: false,
   agentDispatchRequested: false,
   agentDispatchStartedAt: 0,
   knownAgentIdentities: new Set(),
@@ -59,6 +73,8 @@ const state = {
   debugTtsPreparedText: "",
   debugTtsPaused: false,
   debugTtsEnded: false,
+  debugE2E: null,
+  latestServerTotalMs: null,
   clientIdentity: null,
   transcriptSeen: new Map(),
   transcriptContentSeen: new Map(),
@@ -97,9 +113,14 @@ const el = {
   latencyStatus: document.getElementById("latencyStatus"),
   latencyStt: document.getElementById("latencyStt"),
   latencyEouWait: document.getElementById("latencyEouWait"),
+  latencyEouToLlm: document.getElementById("latencyEouToLlm"),
   latencyLlm: document.getElementById("latencyLlm"),
+  latencyLlmToTts: document.getElementById("latencyLlmToTts"),
   latencyTts: document.getElementById("latencyTts"),
+  latencyOutput: document.getElementById("latencyOutput"),
+  latencyServerTotal: document.getElementById("latencyServerTotal"),
   latencyTotal: document.getElementById("latencyTotal"),
+  latencyResidual: document.getElementById("latencyResidual"),
   latencyMode: document.getElementById("latencyMode"),
   stopBtn: document.getElementById("stopBtn"),
   score: document.getElementById("scoreValue"),
@@ -309,6 +330,7 @@ async function connectRoom() {
   });
   room.on("disconnected", () => {
     stopDetectorTrack();
+    stopMicAudioMonitor();
     clearLiveBubbleTimer("user");
     clearLiveBubbleTimer("assistant");
     clearAssistantReadyTimer();
@@ -558,23 +580,47 @@ function updateLatencyMetrics(message, speaker) {
   const debug = message.debug || {};
   const stt = metricNumber(metrics.audio_tail_to_asr_final_ms ?? metrics.asr);
   const eouWait = metricNumber(metrics.asr_final_to_eou_confirmed_ms ?? metrics.eou_wait);
+  const eouToLlm = metricNumber(metrics.eou_to_llm_input_ms);
   const llm = metricNumber(metrics.llm_input_to_first_token_ms ?? metrics.llm);
+  const llmToTts = metricNumber(metrics.llm_first_token_to_tts_text_ms);
   const tts = metricNumber(metrics.tts_text_to_first_audio_ms ?? metrics.tts);
-  const total = metricNumber(metrics.audio_tail_to_tts_first_audio_ms ?? metrics.total);
+  const output = metricNumber(metrics.tts_first_audio_to_playback_ms);
+  const serverTotal = metricNumber(metrics.speech_tail_to_playback_started_ms ?? metrics.total);
+  state.latestServerTotalMs = serverTotal;
+  const clientTotal = metricNumber(state.debugE2E?.totalMs);
+  const usingClientE2E = Boolean(state.debugE2E);
+  const total = usingClientE2E ? clientTotal : serverTotal;
+  const residual =
+    Number.isFinite(clientTotal) && Number.isFinite(serverTotal)
+      ? clientTotal - serverTotal
+      : null;
   const mode = debug.preemptiveGenerationUsed ? "preemptive" : "regular";
 
-  setText(el.latencyStatus, `seq ${message.seq ?? "--"}`, "ok");
+  setText(
+    el.latencyStatus,
+    `seq ${message.seq ?? "--"}${usingClientE2E ? " / client E2E" : ""}`,
+    "ok"
+  );
   el.latencyStt.textContent = formatMs(stt);
   el.latencyEouWait.textContent = formatMs(eouWait);
+  el.latencyEouToLlm.textContent = formatMs(eouToLlm);
   el.latencyLlm.textContent = formatMs(llm);
+  el.latencyLlmToTts.textContent = formatMs(llmToTts);
   el.latencyTts.textContent = formatMs(tts);
+  el.latencyOutput.textContent = formatMs(output);
+  el.latencyServerTotal.textContent = formatMs(serverTotal);
   el.latencyTotal.textContent = formatMs(total);
+  el.latencyResidual.textContent = formatMs(residual);
   el.latencyMode.textContent = mode;
   el.latencyMode.style.color = debug.preemptiveGenerationUsed ? "var(--blue)" : "";
   log(
     `latency seq=${message.seq ?? "--"} from ${speaker}: stt=${formatMs(stt)} eou=${formatMs(
       eouWait
-    )} llm=${formatMs(llm)} tts=${formatMs(tts)} total=${formatMs(total)} mode=${mode} anchor=${
+    )} eouToLlm=${formatMs(eouToLlm)} llm=${formatMs(llm)} llmToTts=${formatMs(
+      llmToTts
+    )} tts=${formatMs(tts)} output=${formatMs(output)} total=${formatMs(
+      total
+    )} serverTotal=${formatMs(serverTotal)} residual=${formatMs(residual)} mode=${mode} anchor=${
       debug.audioTailSource || "--"
     }`
   );
@@ -634,6 +680,7 @@ function attachRemoteAudio(track, publication, participant) {
   attachedAudio.dataset.participant = participant.identity;
   attachedAudio.dataset.trackSid = publication?.trackSid || publication?.sid || "";
   state.remoteAudioElements.set(key, { audio: attachedAudio, track });
+  startRemoteAudioMonitor(track, key);
   if (isExpectedAgentParticipant(participant)) {
     state.activeAgentIdentity = participant.identity;
     setAgentState("audio ready", "ok");
@@ -653,6 +700,7 @@ function attachParticipantAudioFromPublications(participant) {
 
 function detachRemoteAudio(track, publication, participant) {
   const key = remoteAudioKey(track, publication, participant);
+  stopRemoteAudioMonitor(key);
   const known = state.remoteAudioElements.get(key);
   for (const audio of track.detach()) {
     if (audio !== state.agentAudioElement) {
@@ -673,6 +721,7 @@ function detachRemoteAudio(track, publication, participant) {
 function detachParticipantAudio(participant) {
   for (const [key, item] of state.remoteAudioElements.entries()) {
     if (key.startsWith(`${participant.identity}:`)) {
+      stopRemoteAudioMonitor(key);
       item.track?.detach?.();
       if (item.audio !== state.agentAudioElement) {
         item.audio.remove();
@@ -686,6 +735,9 @@ function detachParticipantAudio(participant) {
 }
 
 function clearRemoteAudio() {
+  for (const key of state.remoteAudioMonitors.keys()) {
+    stopRemoteAudioMonitor(key);
+  }
   for (const item of state.remoteAudioElements.values()) {
     item.track?.detach?.();
     if (item.audio !== state.agentAudioElement) {
@@ -785,6 +837,8 @@ async function startMic() {
     source: Track.Source.Microphone,
   });
   state.micTrack = track;
+  state.debugE2E = createClientE2EMeasurement("mic");
+  startMicAudioMonitor(track);
   registerDetectorTrack(publication);
   state.activeInput = "mic";
   setInputState("microphone", "active");
@@ -899,6 +953,7 @@ async function stopInput() {
     return;
   }
   stopDetectorTrack();
+  stopMicAudioMonitor();
   if (state.micTrack) {
     await state.room.localParticipant.unpublishTrack(state.micTrack, true);
     state.micTrack = null;
@@ -977,17 +1032,22 @@ async function synthesizeDebugTts() {
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    const blob = await response.blob();
-    if (!blob.size) {
+    const audioBytes = await response.arrayBuffer();
+    if (!audioBytes.byteLength) {
       throw new Error("debug TTS returned empty audio");
     }
-    state.debugTtsBlob = blob;
+    const trimmed = await trimDebugTtsAudio(audioBytes);
+    state.debugTtsBlob = trimmed.blob;
     state.debugTtsPreparedText = text;
     state.debugTtsEnded = false;
     state.debugTtsSynthesizing = false;
     restoreDebugTtsInputState();
     setControls();
-    log(`debug TTS audio ready: ${text.slice(0, 48)}`);
+    log(
+      `debug TTS audio ready: ${text.slice(0, 48)}; trimmed=${trimmed.trimmedMs.toFixed(
+        1
+      )}ms duration=${trimmed.durationMs.toFixed(1)}ms`
+    );
   } catch (error) {
     state.debugTtsSynthesizing = false;
     restoreDebugTtsInputState();
@@ -1053,6 +1113,11 @@ async function startDebugTtsReplay() {
   }
   clearDebugTtsClip();
   beginNewInputRun({ keepTrack: true });
+  state.debugE2E = createClientE2EMeasurement("debug-tts");
+  state.latestServerTotalMs = null;
+  el.latencyServerTotal.textContent = "--";
+  el.latencyTotal.textContent = "--";
+  el.latencyResidual.textContent = "--";
   const text = state.debugTtsPreparedText;
   const audioUrl = URL.createObjectURL(state.debugTtsBlob);
   const audio = new Audio();
@@ -1118,11 +1183,342 @@ async function endDebugTtsSimulation() {
 }
 
 function handleDebugTtsClipEnded() {
+  const endedAt = performance.now();
+  if (state.debugE2E) {
+    state.debugE2E.inputEndedAt = endedAt;
+    state.debugE2E.firstOutputAt = null;
+    state.debugE2E.totalMs = null;
+    state.debugE2E.armed = true;
+    el.latencyTotal.textContent = "--";
+    el.latencyResidual.textContent = "--";
+    setText(el.latencyStatus, "waiting for assistant audio", "active");
+  }
   clearDebugTtsClip({ keepEndedState: true });
   setInputState("debug TTS silence", "active");
   setDialogueState("listening", "active");
   setControls();
   log("debug TTS replay ended; simulation track is holding silence");
+}
+
+async function trimDebugTtsAudio(audioBytes) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    throw new Error("Web Audio API is unavailable in this browser");
+  }
+  const audioContext = new AudioContextClass();
+  try {
+    const decoded = await audioContext.decodeAudioData(audioBytes.slice(0));
+    const sampleRate = decoded.sampleRate;
+    const frameSamples = Math.max(1, Math.round((sampleRate * DEBUG_TTS_TRIM_FRAME_MS) / 1000));
+    const paddingSamples = Math.round((sampleRate * DEBUG_TTS_TRIM_PADDING_MS) / 1000);
+    let peak = 0;
+    for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+      const samples = decoded.getChannelData(channel);
+      for (let index = 0; index < samples.length; index += 1) {
+        peak = Math.max(peak, Math.abs(samples[index]));
+      }
+    }
+
+    const relativeThreshold = peak * 10 ** (DEBUG_TTS_RELATIVE_SILENCE_DB / 20);
+    const rmsThreshold = Math.max(0.001, relativeThreshold);
+    let lastActiveSample = decoded.length;
+    let foundActive = false;
+    for (let end = decoded.length; end > 0; end -= frameSamples) {
+      const start = Math.max(0, end - frameSamples);
+      let sumSquares = 0;
+      let count = 0;
+      for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+        const samples = decoded.getChannelData(channel);
+        for (let index = start; index < end; index += 1) {
+          sumSquares += samples[index] * samples[index];
+          count += 1;
+        }
+      }
+      if (count > 0 && Math.sqrt(sumSquares / count) >= rmsThreshold) {
+        lastActiveSample = end;
+        foundActive = true;
+        break;
+      }
+    }
+
+    const endSample = foundActive
+      ? Math.min(decoded.length, lastActiveSample + paddingSamples)
+      : decoded.length;
+    const blob = encodeAudioBufferAsWav(decoded, endSample);
+    return {
+      blob,
+      trimmedMs: ((decoded.length - endSample) / sampleRate) * 1000,
+      durationMs: (endSample / sampleRate) * 1000,
+    };
+  } finally {
+    await audioContext.close();
+  }
+}
+
+function encodeAudioBufferAsWav(audioBuffer, endSample) {
+  const channels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const sampleCount = Math.max(1, Math.min(audioBuffer.length, endSample));
+  const bytesPerSample = 2;
+  const dataBytes = sampleCount * channels * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataBytes, true);
+
+  const channelData = Array.from({ length: channels }, (_, channel) =>
+    audioBuffer.getChannelData(channel)
+  );
+  let offset = 44;
+  for (let sample = 0; sample < sampleCount; sample += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      const value = Math.max(-1, Math.min(1, channelData[channel][sample]));
+      view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function startRemoteAudioMonitor(track, key) {
+  stopRemoteAudioMonitor(key);
+  const mediaTrack = track?.mediaStreamTrack;
+  const audioContext = state.audioContext;
+  if (!mediaTrack || !audioContext || typeof window.MediaStream !== "function") {
+    log("client E2E audio monitor unavailable");
+    return;
+  }
+  try {
+    const stream = new MediaStream([mediaTrack]);
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    const silentGain = audioContext.createGain();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0;
+    silentGain.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+    const samples = new Float32Array(analyser.fftSize);
+    const monitor = {
+      source,
+      analyser,
+      silentGain,
+      frameId: 0,
+      consecutive: 0,
+      candidateAt: null,
+      lastActiveAt: null,
+    };
+    const poll = () => {
+      analyser.getFloatTimeDomainData(samples);
+      let sumSquares = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        sumSquares += samples[index] * samples[index];
+      }
+      const rms = Math.sqrt(sumSquares / samples.length);
+      const now = performance.now();
+      if (rms >= REMOTE_SPEECH_RMS_THRESHOLD) {
+        monitor.lastActiveAt = now;
+        state.agentOutputActive = true;
+      } else if (
+        monitor.lastActiveAt !== null &&
+        now - monitor.lastActiveAt >= REMOTE_SPEECH_RELEASE_MS
+      ) {
+        monitor.lastActiveAt = null;
+        state.agentOutputActive = false;
+      }
+      const measurement = state.debugE2E;
+      if (measurement?.armed && measurement.inputEndedAt !== null && measurement.totalMs === null) {
+        if (rms >= REMOTE_SPEECH_RMS_THRESHOLD) {
+          if (monitor.consecutive === 0) {
+            monitor.candidateAt = performance.now();
+          }
+          monitor.consecutive += 1;
+          if (monitor.consecutive >= REMOTE_SPEECH_CONFIRM_FRAMES) {
+            measurement.firstOutputAt = monitor.candidateAt;
+            measurement.totalMs = Math.max(0, measurement.firstOutputAt - measurement.inputEndedAt);
+            measurement.armed = false;
+            el.latencyTotal.textContent = formatMs(measurement.totalMs);
+            const residual = Number.isFinite(state.latestServerTotalMs)
+              ? measurement.totalMs - state.latestServerTotalMs
+              : null;
+            el.latencyResidual.textContent = formatMs(residual);
+            setText(el.latencyStatus, `${measurement.mode} client E2E measured`, "ok");
+            log(`${measurement.mode} client E2E total=${formatMs(measurement.totalMs)}`);
+          }
+        } else {
+          monitor.consecutive = 0;
+          monitor.candidateAt = null;
+        }
+      } else {
+        monitor.consecutive = 0;
+        monitor.candidateAt = null;
+      }
+      monitor.frameId = window.requestAnimationFrame(poll);
+    };
+    monitor.frameId = window.requestAnimationFrame(poll);
+    state.remoteAudioMonitors.set(key, monitor);
+  } catch (error) {
+    log(`client E2E audio monitor failed: ${error.message}`);
+  }
+}
+
+function stopRemoteAudioMonitor(key) {
+  const monitor = state.remoteAudioMonitors.get(key);
+  if (!monitor) {
+    return;
+  }
+  window.cancelAnimationFrame(monitor.frameId);
+  withSuppressedErrors(() => monitor.source.disconnect());
+  withSuppressedErrors(() => monitor.analyser.disconnect());
+  withSuppressedErrors(() => monitor.silentGain.disconnect());
+  state.remoteAudioMonitors.delete(key);
+  if (state.remoteAudioMonitors.size === 0) {
+    state.agentOutputActive = false;
+  }
+}
+
+function createClientE2EMeasurement(mode) {
+  return {
+    mode,
+    inputEndedAt: null,
+    firstOutputAt: null,
+    totalMs: null,
+    armed: false,
+  };
+}
+
+function startMicAudioMonitor(track) {
+  stopMicAudioMonitor();
+  const mediaTrack = track?.mediaStreamTrack;
+  const audioContext = state.audioContext;
+  if (!mediaTrack || !audioContext || typeof window.MediaStream !== "function") {
+    log("microphone client E2E monitor unavailable");
+    return;
+  }
+  try {
+    const source = audioContext.createMediaStreamSource(new MediaStream([mediaTrack]));
+    const analyser = audioContext.createAnalyser();
+    const silentGain = audioContext.createGain();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0;
+    silentGain.gain.value = 0;
+    source.connect(analyser);
+    analyser.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+    const samples = new Float32Array(analyser.fftSize);
+    const monitor = {
+      source,
+      analyser,
+      silentGain,
+      frameId: 0,
+      noiseFloor: 0.0015,
+      speechFrames: 0,
+      speaking: false,
+      silenceStartedAt: null,
+    };
+    const poll = () => {
+      analyser.getFloatTimeDomainData(samples);
+      let sumSquares = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        sumSquares += samples[index] * samples[index];
+      }
+      const rms = Math.sqrt(sumSquares / samples.length);
+      const now = performance.now();
+      const speechThreshold = Math.max(
+        MIC_VAD_MIN_RMS,
+        Math.min(0.03, monitor.noiseFloor * MIC_VAD_NOISE_MULTIPLIER)
+      );
+      const silenceThreshold = Math.max(MIC_VAD_MIN_RMS * 0.75, speechThreshold * 0.65);
+
+      if (!monitor.speaking && !state.agentOutputActive) {
+        if (rms >= speechThreshold) {
+          monitor.speechFrames += 1;
+          if (monitor.speechFrames >= MIC_VAD_SPEECH_CONFIRM_FRAMES) {
+            monitor.speaking = true;
+            monitor.speechFrames = 0;
+            monitor.silenceStartedAt = null;
+            beginMicClientTurn();
+          }
+        } else {
+          monitor.speechFrames = 0;
+          monitor.noiseFloor += MIC_VAD_NOISE_ALPHA * (rms - monitor.noiseFloor);
+        }
+      } else if (monitor.speaking) {
+        if (rms >= silenceThreshold) {
+          monitor.silenceStartedAt = null;
+        } else if (monitor.silenceStartedAt === null) {
+          monitor.silenceStartedAt = now;
+        } else if (now - monitor.silenceStartedAt >= MIC_VAD_SILENCE_MS) {
+          finishMicClientTurn(monitor.silenceStartedAt);
+          monitor.speaking = false;
+          monitor.silenceStartedAt = null;
+          monitor.speechFrames = 0;
+        }
+      } else {
+        monitor.speechFrames = 0;
+      }
+      monitor.frameId = window.requestAnimationFrame(poll);
+    };
+    monitor.frameId = window.requestAnimationFrame(poll);
+    state.micAudioMonitor = monitor;
+    log("microphone client E2E monitor ready");
+  } catch (error) {
+    log(`microphone client E2E monitor failed: ${error.message}`);
+  }
+}
+
+function beginMicClientTurn() {
+  const measurement = state.debugE2E;
+  if (!measurement || measurement.mode !== "mic") {
+    return;
+  }
+  measurement.inputEndedAt = null;
+  measurement.firstOutputAt = null;
+  measurement.totalMs = null;
+  measurement.armed = false;
+  state.latestServerTotalMs = null;
+  resetLatencyMetrics();
+  setText(el.latencyStatus, "microphone speech detected", "active");
+  log("microphone local VAD speech started");
+}
+
+function finishMicClientTurn(inputEndedAt) {
+  const measurement = state.debugE2E;
+  if (!measurement || measurement.mode !== "mic") {
+    return;
+  }
+  measurement.inputEndedAt = inputEndedAt;
+  measurement.firstOutputAt = null;
+  measurement.totalMs = null;
+  measurement.armed = true;
+  el.latencyTotal.textContent = "--";
+  el.latencyResidual.textContent = "--";
+  setText(el.latencyStatus, "waiting for assistant audio", "active");
+  log("microphone local VAD speech ended; client E2E armed");
+}
+
+function stopMicAudioMonitor() {
+  const monitor = state.micAudioMonitor;
+  if (!monitor) {
+    return;
+  }
+  window.cancelAnimationFrame(monitor.frameId);
+  withSuppressedErrors(() => monitor.source.disconnect());
+  withSuppressedErrors(() => monitor.analyser.disconnect());
+  withSuppressedErrors(() => monitor.silentGain.disconnect());
+  state.micAudioMonitor = null;
 }
 
 function clearDebugTtsClip(options = {}) {
@@ -1174,6 +1570,7 @@ function beginNewInputRun(options = {}) {
     state.activeTrackSid = null;
   }
   state.acceptingPoints = true;
+  state.debugE2E = null;
 }
 
 function resetSeries(options = {}) {
@@ -1365,9 +1762,15 @@ function resetLatencyMetrics() {
   setText(el.latencyStatus, "waiting");
   el.latencyStt.textContent = "--";
   el.latencyEouWait.textContent = "--";
+  el.latencyEouToLlm.textContent = "--";
   el.latencyLlm.textContent = "--";
+  el.latencyLlmToTts.textContent = "--";
   el.latencyTts.textContent = "--";
+  el.latencyOutput.textContent = "--";
+  el.latencyServerTotal.textContent = "--";
   el.latencyTotal.textContent = "--";
+  el.latencyResidual.textContent = "--";
+  state.latestServerTotalMs = null;
   el.latencyMode.textContent = "--";
   el.latencyMode.style.color = "";
 }

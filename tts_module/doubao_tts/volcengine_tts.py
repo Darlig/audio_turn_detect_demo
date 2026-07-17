@@ -119,6 +119,13 @@ class SynthesizedPCM:
     num_channels: int = 1
 
 
+@dataclass
+class _PreparedTTSSession:
+    ws: aiohttp.ClientWebSocketResponse
+    request_id: str
+    session_id: str
+
+
 class VolcengineStreamingTTS(tts.TTS):
     """LiveKit TTS adapter for Doubao/Volcengine bidirectional TTS V3.
 
@@ -183,6 +190,7 @@ class VolcengineStreamingTTS(tts.TTS):
         self._session = http_session
         self._owns_session = http_session is None
         self._request_seq = 0
+        self._prewarm_task: asyncio.Task[_PreparedTTSSession] | None = None
 
     @property
     def model(self) -> str:
@@ -208,7 +216,37 @@ class VolcengineStreamingTTS(tts.TTS):
             turn_sequence=turn_sequence,
         )
 
+    def prewarm(self) -> None:
+        if self._prewarm_task is not None and not self._prewarm_task.done():
+            return
+        if self._prewarm_task is not None:
+            try:
+                prepared = self._prewarm_task.result()
+            except Exception:
+                self._prewarm_task = None
+            else:
+                if not prepared.ws.closed:
+                    return
+                self._prewarm_task = None
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._prewarm_task = asyncio.create_task(
+            self._prepare_session(DEFAULT_API_CONNECT_OPTIONS.timeout),
+            name="VolcengineTTS.prewarm",
+        )
+
     async def aclose(self) -> None:
+        if self._prewarm_task is not None:
+            try:
+                prepared = await self._prewarm_task
+            except (Exception, asyncio.CancelledError):
+                pass
+            else:
+                await prepared.ws.close()
+            self._prewarm_task = None
         if self._owns_session and self._session:
             await self._session.close()
         self._session = None
@@ -217,6 +255,57 @@ class VolcengineStreamingTTS(tts.TTS):
         if self._session is None:
             self._session = aiohttp.ClientSession()
         return self._session
+
+    async def _acquire_prepared_session(self, timeout: float) -> _PreparedTTSSession:
+        task = self._prewarm_task
+        self._prewarm_task = None
+        if task is not None:
+            try:
+                prepared = await task
+            except Exception:
+                prepared = None
+            if prepared is not None and not prepared.ws.closed:
+                return prepared
+        return await self._prepare_session(timeout)
+
+    async def _prepare_session(self, timeout: float) -> _PreparedTTSSession:
+        request_id = str(uuid.uuid4())
+        session_id = uuid.uuid4().hex[:12]
+        ws = await self._connect(request_id, timeout)
+        try:
+            await ws.send_bytes(build_client_event_frame(EVENT_START_CONNECTION, {}))
+            frame = await receive_volcengine_frame(ws, timeout=timeout)
+            raise_for_failed_frame(frame, request_id=request_id)
+            if frame.event != EVENT_CONNECTION_STARTED:
+                raise unexpected_event_error(
+                    "start connection",
+                    frame,
+                    request_id=request_id,
+                    expected=EVENT_CONNECTION_STARTED,
+                )
+
+            await ws.send_bytes(
+                build_client_event_frame(
+                    EVENT_START_SESSION,
+                    build_tts_session_payload(self._opts, "", event=EVENT_START_SESSION),
+                    session_id=session_id,
+                )
+            )
+            while True:
+                frame = await receive_volcengine_frame(ws, timeout=timeout)
+                raise_for_failed_frame(frame, request_id=request_id)
+                if frame.event == EVENT_SESSION_STARTED:
+                    return _PreparedTTSSession(ws, request_id, session_id)
+                if frame.event in {EVENT_SESSION_FINISHED, EVENT_CONNECTION_FINISHED}:
+                    raise unexpected_event_error(
+                        "start session",
+                        frame,
+                        request_id=request_id,
+                        expected=EVENT_SESSION_STARTED,
+                    )
+        except BaseException:
+            await ws.close()
+            raise
 
     async def _connect(self, request_id: str, timeout: float) -> aiohttp.ClientWebSocketResponse:
         session = self._ensure_session()
@@ -409,9 +498,19 @@ class VolcengineSynthesizeStream(tts.SynthesizeStream):
         self._tts: VolcengineStreamingTTS = tts
         self._opts = tts._opts
         self._turn_sequence = turn_sequence
+        self._first_text_at: float | None = None
+
+    def push_text(self, token: str) -> None:
+        if token and self._first_text_at is None:
+            self._first_text_at = time.perf_counter()
+            self._mark_started()
+        super().push_text(token)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
-        request_id = str(uuid.uuid4())
+        prepared = await self._tts._acquire_prepared_session(self._conn_options.timeout)
+        request_id = prepared.request_id
+        ws = prepared.ws
+        session_id = prepared.session_id
         output_emitter.initialize(
             request_id=request_id,
             sample_rate=self._opts.sample_rate,
@@ -421,55 +520,19 @@ class VolcengineSynthesizeStream(tts.SynthesizeStream):
             frame_size_ms=80,
         )
 
-        ws = await self._tts._connect(request_id, self._conn_options.timeout)
-        session_id = uuid.uuid4().hex[:12]
         segment_started = False
         first_audio_logged = False
         session_finished = False
         connection_finished = False
         finish_sent = False
-        tts_started_at: float | None = None
         sent_text_chars = 0
         sent_segments = 0
 
         try:
-            await ws.send_bytes(build_client_event_frame(EVENT_START_CONNECTION, {}))
-            frame = await receive_volcengine_frame(ws, timeout=self._conn_options.timeout)
-            raise_for_failed_frame(frame, request_id=request_id)
-            if frame.event != EVENT_CONNECTION_STARTED:
-                raise unexpected_event_error(
-                    "start connection",
-                    frame,
-                    request_id=request_id,
-                    expected=EVENT_CONNECTION_STARTED,
-                )
-
-            await ws.send_bytes(
-                build_client_event_frame(
-                    EVENT_START_SESSION,
-                    build_tts_session_payload(self._opts, "", event=EVENT_START_SESSION),
-                    session_id=session_id,
-                )
-            )
-
-            while True:
-                frame = await receive_volcengine_frame(ws, timeout=self._conn_options.timeout)
-                raise_for_failed_frame(frame, request_id=request_id)
-                if frame.event == EVENT_SESSION_STARTED:
-                    break
-                if frame.event == EVENT_SESSION_FINISHED:
-                    session_finished = True
-                    output_emitter.end_input()
-                    return
-                if frame.event == EVENT_CONNECTION_FINISHED:
-                    connection_finished = True
-                    output_emitter.end_input()
-                    return
-
             first_task_sent = asyncio.Event()
 
             async def send_input_text() -> None:
-                nonlocal finish_sent, sent_text_chars, sent_segments, tts_started_at
+                nonlocal finish_sent, sent_text_chars, sent_segments
 
                 send_mode = os.getenv("VOLC_TTS_STREAM_SEND_MODE", "chunk").strip().lower()
                 log_input_chunks = _env_bool("VOLC_TTS_LOG_INPUT_CHUNKS", False)
@@ -485,13 +548,10 @@ class VolcengineSynthesizeStream(tts.SynthesizeStream):
                     )
 
                 async def send_text_piece(piece: str) -> None:
-                    nonlocal sent_text_chars, sent_segments, tts_started_at
+                    nonlocal sent_text_chars, sent_segments
                     text = piece.strip() if segmenter is not None else piece
                     if not text.strip():
                         return
-                    if tts_started_at is None:
-                        tts_started_at = time.perf_counter()
-                        self._mark_started()
                     await ws.send_bytes(
                         build_client_event_frame(
                             EVENT_TASK_REQUEST,
@@ -567,13 +627,13 @@ class VolcengineSynthesizeStream(tts.SynthesizeStream):
                         first_audio_at = time.perf_counter()
                         timing = record_tts_first_audio(
                             self._turn_sequence,
-                            tts_started_at=tts_started_at or first_audio_at,
+                            tts_started_at=self._first_text_at or first_audio_at,
                             tts_first_audio_at=first_audio_at,
                         )
                         print(
                             "[turn_metrics] "
                             f"stage=tts seq={self._turn_sequence} "
-                            f"first_audio_ms={format_metric(elapsed_ms(tts_started_at, first_audio_at))} "
+                            f"first_audio_ms={format_metric(elapsed_ms(self._first_text_at, first_audio_at))} "
                             f"user_speech_end_to_tts_first_audio_ms="
                             f"{format_metric(elapsed_ms(timing.speech_ended_at, first_audio_at))} "
                             f"asr_final_to_tts_first_audio_ms="

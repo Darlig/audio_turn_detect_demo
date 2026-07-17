@@ -96,16 +96,36 @@
             <strong id="latencyEouWait">--</strong>
           </div>
           <div>
+            <span class="label">EOU to LLM</span>
+            <strong id="latencyEouToLlm">--</strong>
+          </div>
+          <div>
             <span class="label">LLM TTFT</span>
             <strong id="latencyLlm">--</strong>
+          </div>
+          <div>
+            <span class="label">LLM to TTS</span>
+            <strong id="latencyLlmToTts">--</strong>
           </div>
           <div>
             <span class="label">TTS First</span>
             <strong id="latencyTts">--</strong>
           </div>
           <div>
-            <span class="label">Total</span>
+            <span class="label">Output</span>
+            <strong id="latencyOutput">--</strong>
+          </div>
+          <div>
+            <span class="label">Server Total</span>
+            <strong id="latencyServerTotal">--</strong>
+          </div>
+          <div>
+            <span class="label">Total E2E</span>
             <strong id="latencyTotal">--</strong>
+          </div>
+          <div>
+            <span class="label">Residual</span>
+            <strong id="latencyResidual">--</strong>
           </div>
           <div>
             <span class="label">Mode</span>
@@ -199,6 +219,6 @@
         <pre id="log"></pre>
       </section>
     </main>
-    <script type="module" src="/static/app.js?v=20260716-eot-track-binding"></script>
+    <script type="module" src="/static/app.js?v=20260717-mic-e2e"></script>
   </body>
 </html>

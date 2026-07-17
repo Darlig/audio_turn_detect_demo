@@ -66,7 +66,6 @@ def load_runtime_env() -> None:
 _install_project_import_paths()
 load_runtime_env()
 
-from doubao_llm import DoubaoResponsesLLM  # noqa: E402
 from doubao_tts import VolcengineStreamingTTS  # noqa: E402
 from livekit.agents import (  # noqa: E402
     Agent,
@@ -83,8 +82,11 @@ from livekit.agents import (  # noqa: E402
 from livekit.agents.voice.room_io import RoomOptions  # noqa: E402
 
 from .stt_factory import create_stt  # noqa: E402
+from .llm_factory import create_llm  # noqa: E402
 from .turn_metrics import (  # noqa: E402
     record_eou_confirmed,
+    record_playback_started,
+    record_vad_speech_tail,
     reset_turn_metrics,
     set_metrics_callback,
 )
@@ -136,7 +138,7 @@ async def entrypoint(ctx: JobContext) -> None:
         else endpoint_system_max_delay
     )
     endpoint_max_source = "debug" if endpoint_debug_max_delay is not None else "system"
-    require_eou_positive = _env_bool("AGENT_REQUIRE_EOU_POSITIVE", True)
+    require_eou_positive = _env_bool("AGENT_REQUIRE_EOU_POSITIVE", False)
     logger.info(
         "endpointing config min_delay=%s max_delay=%s max_source=%s system_max_delay=%s require_eou_positive=%s",
         endpoint_min_delay,
@@ -146,13 +148,14 @@ async def entrypoint(ctx: JobContext) -> None:
         require_eou_positive,
     )
 
+    tts_client = VolcengineStreamingTTS()
     session = AgentSession(
         stt=create_stt(),
-        llm=DoubaoResponsesLLM(
+        llm=create_llm(
             temperature=_env_float("DOUBAO_TEMPERATURE"),
             max_output_tokens=_env_int("DOUBAO_MAX_OUTPUT_TOKENS"),
         ),
-        tts=VolcengineStreamingTTS(),
+        tts=tts_client,
         vad=inference.VAD(
             model="silero",
             min_speech_duration=_env_float("AGENT_VAD_MIN_SPEECH_DURATION", 0.05),
@@ -219,6 +222,21 @@ async def entrypoint(ctx: JobContext) -> None:
             eou_confirmed_at=time.perf_counter(),
             transcript=str(getattr(ev, "transcript", "") or ""),
         )
+
+    @session.on("user_state_changed")
+    def _on_user_state_changed(ev: object) -> None:
+        new_state = getattr(ev, "new_state", None)
+        if new_state == "speaking":
+            tts_client.prewarm()
+        elif getattr(ev, "old_state", None) == "speaking" and new_state == "listening":
+            event_wall_time = float(getattr(ev, "created_at", time.time()))
+            speech_ended_at = time.perf_counter() - max(0.0, time.time() - event_wall_time)
+            record_vad_speech_tail(speech_ended_at=speech_ended_at)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: object) -> None:
+        if getattr(ev, "new_state", None) == "speaking":
+            record_playback_started(playback_started_at=time.perf_counter())
 
     async def log_usage() -> None:
         logger.info("session usage: %s", session.usage)
