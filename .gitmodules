@@ -2,3 +2,6 @@
     path = agents
     url = git@github.com:Darlig/livekit-agents.git
     branch = demo
+[submodule "asr_module/funasr_cpp_onnx/upstream/FunASR"]
+	path = asr_module/funasr_cpp_onnx/upstream/FunASR
+	url = git@github.com:Darlig/FunASR.git
